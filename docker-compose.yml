@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./app:/app
+    command: uvicorn app5:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
