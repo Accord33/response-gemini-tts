@@ -1,11 +1,11 @@
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
-from fastapi.responses import FileResponse
 
 import io
 import os
 import wave
+import asyncio
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -19,7 +19,7 @@ def wave_bytes(
     rate: int = 24000,
     sample_width: int = 2,
 ) -> bytes:
-    """PCMデータをWaveファイルフォーマット(bytes)にパックして返す。"""
+    """PCM を WAVE バイナリに変換"""
     buf = io.BytesIO()
     with wave.open(buf, 'wb') as wf:
         wf.setnchannels(channels)
@@ -28,12 +28,20 @@ def wave_bytes(
         wf.writeframes(pcm)
     return buf.getvalue()
 
+
 @dataclass(frozen=True)
 class SpeakerSetting:
     speaker: str
     voice_name: str
 
-def generate_audio(client: Client, content: str, speakers: list[SpeakerSetting]) -> bytes:
+
+def generate_audio_sync(content: str) -> bytes:
+    """
+    Gemini TTS 同期版（ブロッキング）
+    → run_in_executor でスレッドに逃がして非同期化する
+    """
+    client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+
     voice_response = client.models.generate_content(
         model='gemini-2.5-flash-preview-tts',
         contents=content,
@@ -43,102 +51,70 @@ def generate_audio(client: Client, content: str, speakers: list[SpeakerSetting])
                 multi_speaker_voice_config=types.MultiSpeakerVoiceConfig(
                     speaker_voice_configs=[
                         types.SpeakerVoiceConfig(
-                            speaker=s.speaker,
+                            speaker='A',
                             voice_config=types.VoiceConfig(
                                 prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                    voice_name=s.voice_name,
+                                    voice_name='Leda'
                                 )
-                            ),
+                            )
+                        ),
+                        types.SpeakerVoiceConfig(
+                            speaker='B',
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name='Gacrux'
+                                )
+                            )
                         )
-                        for s in speakers
                     ]
                 )
             ),
         ),
     )
 
-    candidates = voice_response.candidates
-    if (
-        candidates and candidates[0].content and
-        candidates[0].content.parts and
-        candidates[0].content.parts[0].inline_data
-    ):
-        data: bytes = candidates[0].content.parts[0].inline_data.data
-    else:
-        raise ValueError('APIから音声データが受信されませんでした。')
+    parts = voice_response.candidates[0].content.parts
+    if not parts or not parts[0].inline_data:
+        raise RuntimeError("音声データが取得できませんでした")
 
-    if not data:
-        raise ValueError('APIから音声データが受信されませんでした。')
+    pcm = parts[0].inline_data.data
 
-    return data
+    # PCM → WAV
+    return wave_bytes(pcm)
 
-def build_wav_from_prompt(content: str) -> bytes:
-    client = Client(api_key=os.getenv('GEMINI_API_KEY'))
-    pcm_bytes = generate_audio(
-        client,
-        content,
-        speakers=[
-            SpeakerSetting(speaker='A', voice_name='Leda'),
-            SpeakerSetting(speaker='B', voice_name='Gacrux'),
-        ],
-    )
-    wav = wave_bytes(pcm_bytes, channels=1, rate=24000, sample_width=2)
-    
-    # test.wavファイルに書き込み
-    with open('output.wav', 'wb') as f:
-        f.write(wav)
-    
-    return wav
+
+async def generate_audio_async(content: str) -> bytes:
+    """
+    ブロッキング処理を event loop から切り離す
+    FastAPI / asyncio を止めない
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, generate_audio_sync, content)
+
 
 app = FastAPI()
+
 
 class InputData(BaseModel):
     prompt: str
     content: str
 
-# --- JSON 専用(動作確認用) ---
-@app.post("/api/ping")
-async def ping():
-    return JSONResponse({"result": "pong"})
 
-# --- WAV バイナリ専用（Dify のファイル出力用） ---
-audio_binary_response = {
-    200: {
-        "description": "Generated WAV audio",
-        "content": {
-            "audio/wav": {
-                "schema": {"type": "string", "format": "binary"}
-            }
-        }
-    },
-    400: {"description": "Bad Request"},
-    500: {"description": "Internal Server Error"},
-}
-
-AUDIO_PATH = "./output.wav"
-
-@app.post("/audio", responses=audio_binary_response)
+@app.post("/audio")
 async def audio(data: InputData = Body(...)):
-    try:
-        if not data.content:
-            raise HTTPException(status_code=400, detail="content is required")
-        
-        print(data.prompt)
+    if not data.prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
 
-        wav_bytes = build_wav_from_prompt(data.prompt)
-        
-        # Dify/クライアントが確実に「ファイル」として扱うよう attachment を推奨
-        print("生成終了：ファイル送信開始")
-        return FileResponse(
-            path=str(AUDIO_PATH),
+    try:
+        # 非同期で音声生成（バックグラウンドスレッドで実行される）
+        wav_bytes = await generate_audio_async(data.prompt)
+
+        # BytesIO から直接 StreamingResponse を返す（ファイル保存なし）
+        return StreamingResponse(
+            io.BytesIO(wav_bytes),
             media_type="audio/wav",
-            filename=AUDIO_PATH,                  # Content-Disposition: attachment; filename="..."
-            headers={"Cache-Control": "no-store"}      # 任意：キャッシュ抑止
+            headers={"Cache-Control": "no-store"},
         )
 
-    except HTTPException:
-        raise
     except Exception as e:
-        # ログ出力のみ簡略
-        print(f"[ERROR] {e}")
+        print("[ERROR]", e)
         raise HTTPException(status_code=500, detail=str(e))
