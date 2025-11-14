@@ -108,11 +108,14 @@ async def audio(data: InputData = Body(...)):
         # 非同期で音声生成（バックグラウンドスレッドで実行される）
         wav_bytes = await generate_audio_async(data.prompt)
 
-        # BytesIO から直接 StreamingResponse を返す（ファイル保存なし）
+        # ファイルとしてダウンロード可能なレスポンスを返す
         return StreamingResponse(
             io.BytesIO(wav_bytes),
             media_type="audio/wav",
-            headers={"Cache-Control": "no-store"},
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": "attachment; filename=audio.wav"
+            },
         )
 
     except Exception as e:
