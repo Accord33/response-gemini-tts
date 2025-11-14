@@ -1,11 +1,12 @@
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import io
 import os
 import wave
 import asyncio
+import tempfile
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -108,14 +109,16 @@ async def audio(data: InputData = Body(...)):
         # 非同期で音声生成（バックグラウンドスレッドで実行される）
         wav_bytes = await generate_audio_async(data.prompt)
 
-        # ファイルとしてダウンロード可能なレスポンスを返す
-        return StreamingResponse(
-            io.BytesIO(wav_bytes),
+        # 一時ファイルに保存
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            tmp_file.write(wav_bytes)
+            tmp_path = tmp_file.name
+
+        # ファイルレスポンスを返す
+        return FileResponse(
+            tmp_path,
             media_type="audio/wav",
-            headers={
-                "Cache-Control": "no-store",
-                "Content-Disposition": "attachment; filename=audio.wav"
-            },
+            filename="audio.wav"
         )
 
     except Exception as e:
