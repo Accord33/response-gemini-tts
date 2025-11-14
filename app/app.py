@@ -7,12 +7,20 @@ import os
 import wave
 import asyncio
 import tempfile
+import logging
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
 from google.genai import Client, types
 
 load_dotenv()
+
+# ロギング設定
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def wave_bytes(
     pcm: bytes,
@@ -41,6 +49,7 @@ def generate_audio_sync(content: str) -> bytes:
     Gemini TTS 同期版（ブロッキング）
     → run_in_executor でスレッドに逃がして非同期化する
     """
+    logger.info(f"音声生成開始: {content[:50]}...")
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     voice_response = client.models.generate_content(
@@ -78,9 +87,12 @@ def generate_audio_sync(content: str) -> bytes:
         raise RuntimeError("音声データが取得できませんでした")
 
     pcm = parts[0].inline_data.data
+    logger.info(f"PCMデータ取得成功: {len(pcm)} bytes")
 
     # PCM → WAV
-    return wave_bytes(pcm)
+    wav_data = wave_bytes(pcm)
+    logger.info(f"WAV変換完了: {len(wav_data)} bytes")
+    return wav_data
 
 
 async def generate_audio_async(content: str) -> bytes:
@@ -106,6 +118,7 @@ async def audio(data: InputData = Body(...)):
         raise HTTPException(status_code=400, detail="prompt is required")
 
     try:
+        logger.info("リクエスト受信: /audio")
         # 非同期で音声生成（バックグラウンドスレッドで実行される）
         wav_bytes = await generate_audio_async(data.prompt)
 
@@ -113,8 +126,11 @@ async def audio(data: InputData = Body(...)):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
             tmp_file.write(wav_bytes)
             tmp_path = tmp_file.name
+        
+        logger.info(f"一時ファイル作成: {tmp_path}")
 
         # ファイルレスポンスを返す
+        logger.info(f"ファイルレスポンス返却: {tmp_path}")
         return FileResponse(
             tmp_path,
             media_type="audio/wav",
@@ -122,5 +138,5 @@ async def audio(data: InputData = Body(...)):
         )
 
     except Exception as e:
-        print("[ERROR]", e)
+        logger.error(f"エラー発生: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
